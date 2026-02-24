@@ -1,0 +1,116 @@
+"use client";
+
+import { Navigation, BlueprintBackground } from "@/components/Navigation";
+import { useProject } from "@/context/ProjectContext";
+import { ChevronDown, User, LogOut, Settings, LayoutDashboard } from "lucide-react";
+import { useState } from "react";
+import Link from "next/link";
+import { clsx } from "clsx";
+
+export default function AppLayout({
+    children,
+}: {
+    children: React.ReactNode;
+}) {
+    const { projects, activeProject, setActiveProjectId, logout } = useProject();
+    const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false);
+    const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
+
+    return (
+        <div className="min-h-screen flex flex-col text-ink selection:bg-ink selection:text-surface">
+            <BlueprintBackground />
+
+            <header className="flex items-center justify-between px-6 py-3 bg-surface border-b border-line sticky top-0 z-50">
+                <div className="flex items-center gap-8">
+                    <Link href="/" className="text-xl font-bold tracking-tighter hover:opacity-80 transition-opacity">
+                        融資支援AI（仮）
+                    </Link>
+
+                    <div className="relative">
+                        <button
+                            onClick={() => setIsProjectMenuOpen(!isProjectMenuOpen)}
+                            className="flex items-center gap-2 px-3 py-1.5 rounded border border-line bg-accent-surface hover:border-ink transition-colors text-[11px] font-bold"
+                        >
+                            <LayoutDashboard size={14} />
+                            <span>Project: {activeProject?.name || "選択なし"}</span>
+                            <ChevronDown size={12} className={clsx("transition-transform", isProjectMenuOpen && "rotate-180")} />
+                        </button>
+
+                        {isProjectMenuOpen && (
+                            <>
+                                <div className="fixed inset-0 z-10" onClick={() => setIsProjectMenuOpen(false)} />
+                                <div className="absolute top-full left-0 mt-1 w-64 bg-surface border border-line rounded-lg shadow-lg z-20 py-1 overflow-hidden">
+                                    <div className="blueprint-label px-3 py-2 border-b border-line bg-accent-surface">Switch Project</div>
+                                    {projects.map((p) => (
+                                        <button
+                                            key={p.id}
+                                            onClick={() => {
+                                                setActiveProjectId(p.id);
+                                                setIsProjectMenuOpen(false);
+                                            }}
+                                            className={clsx(
+                                                "w-full text-left px-3 py-2 text-[11px] hover:bg-accent-surface transition-colors flex items-center justify-between",
+                                                p.id === activeProject?.id && "font-bold text-ink"
+                                            )}
+                                        >
+                                            <span>{p.name}</span>
+                                            <span className="text-[9px] text-muted">{p.source}</span>
+                                        </button>
+                                    ))}
+                                    <Link
+                                        href="/"
+                                        className="block w-full text-left px-3 py-2 text-[11px] text-muted hover:bg-accent-surface border-t border-line"
+                                        onClick={() => setIsProjectMenuOpen(false)}
+                                    >
+                                        + 新規プロジェクト作成...
+                                    </Link>
+                                </div>
+                            </>
+                        )}
+                    </div>
+                </div>
+
+                <div className="relative">
+                    <button
+                        onClick={() => setIsAccountMenuOpen(!isAccountMenuOpen)}
+                        className="w-9 h-9 rounded-full bg-accent-surface border border-line flex items-center justify-center hover:border-ink transition-colors group"
+                    >
+                        <User size={18} className="group-hover:scale-110 transition-transform" />
+                    </button>
+
+                    {isAccountMenuOpen && (
+                        <>
+                            <div className="fixed inset-0 z-10" onClick={() => setIsAccountMenuOpen(false)} />
+                            <div className="absolute top-full right-0 mt-1 w-48 bg-surface border border-line rounded-lg shadow-lg z-20 py-1 overflow-hidden">
+                                <div className="px-3 py-2 border-b border-line mb-1">
+                                    <div className="font-bold text-[11px]">demo@example.com</div>
+                                    <div className="text-[9px] text-muted">Administrator</div>
+                                </div>
+                                <button className="w-full text-left px-3 py-2 text-[11px] hover:bg-accent-surface flex items-center gap-2">
+                                    <Settings size={14} /> 設定
+                                </button>
+                                <Link href="/admin" className="w-full text-left px-3 py-2 text-[11px] hover:bg-accent-surface flex items-center gap-2">
+                                    <LayoutDashboard size={14} /> 管理画面
+                                </Link>
+                                <div className="border-t border-line mt-1 pt-1">
+                                    <button
+                                        onClick={logout}
+                                        className="w-full text-left px-3 py-2 text-[11px] hover:bg-accent-surface flex items-center gap-2 text-ink"
+                                    >
+                                        <LogOut size={14} /> ログアウト
+                                    </button>
+                                </div>
+                            </div>
+                        </>
+                    )}
+                </div>
+            </header>
+
+            <Navigation />
+
+            <main className="flex-1 p-6 overflow-auto scrollbar-thin scrollbar-thumb-line">
+                {children}
+            </main>
+        </div>
+    );
+}
