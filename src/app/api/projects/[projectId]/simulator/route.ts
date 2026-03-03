@@ -3,11 +3,13 @@ import { prisma } from "@/lib/prisma";
 import { getServerSession } from "next-auth/next";
 import { authOptions } from "../../../auth/[...nextauth]/route";
 
-export async function POST(req: Request, { params }: { params: { projectId: string } }) {
+export async function POST(req: Request, { params }: { params: Promise<{ projectId: string }> }) {
     const session: any = await getServerSession(authOptions as any);
     if (!session || !session.user) {
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
+
+    const { projectId } = await params;
 
     try {
         const body = await req.json();
@@ -22,7 +24,7 @@ export async function POST(req: Request, { params }: { params: { projectId: stri
                 summary,
                 report: reportDetails,
                 messages: messages,
-                projectId: params.projectId
+                projectId: projectId
             }
         });
 

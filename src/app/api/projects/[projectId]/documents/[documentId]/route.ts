@@ -3,11 +3,13 @@ import { prisma } from "@/lib/prisma";
 import { getServerSession } from "next-auth/next";
 import { authOptions } from "../../../../auth/[...nextauth]/route";
 
-export async function PATCH(req: Request, { params }: { params: { projectId: string; documentId: string } }) {
+export async function PATCH(req: Request, { params }: { params: Promise<{ projectId: string; documentId: string }> }) {
     const session: any = await getServerSession(authOptions as any);
     if (!session || !session.user) {
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
+
+    const { projectId, documentId } = await params;
 
     try {
         const body = await req.json();
@@ -16,8 +18,8 @@ export async function PATCH(req: Request, { params }: { params: { projectId: str
         // Find the specific document
         const document = await prisma.document.findFirst({
             where: {
-                projectId: params.projectId,
-                templateId: params.documentId,
+                projectId: projectId,
+                templateId: documentId,
                 project: { userId: session.user.id }
             }
         });
