@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Kosugi, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
+import { AuthProvider } from "@/components/AuthProvider";
 import { ProjectProvider } from "@/context/ProjectContext";
 
 const kosugi = Kosugi({
@@ -29,12 +30,12 @@ export default function RootLayout({
       <body
         className={`${kosugi.variable} ${jetBrainsMono.variable} antialiased`}
       >
-        <ProjectProvider>
-          {children}
-        </ProjectProvider>
+        <AuthProvider>
+          <ProjectProvider>
+            {children}
+          </ProjectProvider>
+        </AuthProvider>
       </body>
     </html>
   );
 }
-
-

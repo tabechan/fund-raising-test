@@ -1,20 +1,33 @@
 "use client";
 
-import { Navigation, BlueprintBackground } from "@/components/Navigation";
+import { BlueprintBackground } from "@/components/Navigation";
 import { useProject } from "@/context/ProjectContext";
-import { ChevronDown, User, LogOut, Settings, LayoutDashboard } from "lucide-react";
+import { ChevronDown, User, LogOut, Settings, LayoutDashboard, Upload, Search, MessageSquare } from "lucide-react";
 import { useState } from "react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { clsx } from "clsx";
+import { useSession } from "next-auth/react";
 
 export default function AppLayout({
     children,
 }: {
     children: React.ReactNode;
 }) {
+    const { data: session } = useSession();
     const { projects, activeProject, setActiveProjectId, logout } = useProject();
     const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false);
     const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
+    const pathname = usePathname();
+
+    const user = session?.user as any;
+    const isAdmin = user?.role === "admin";
+
+    const TABS = [
+        { name: "Document Upload", href: "/upload", icon: <Upload size={14} /> },
+        { name: "Document Checker", href: "/checker", icon: <Search size={14} /> },
+        { name: "Review Simulator", href: "/simulator", icon: <MessageSquare size={14} /> },
+    ];
 
     return (
         <div className="min-h-screen flex flex-col text-ink selection:bg-ink selection:text-surface">
@@ -68,6 +81,27 @@ export default function AppLayout({
                             </>
                         )}
                     </div>
+
+                    <nav className="flex items-center gap-1 ml-4">
+                        {TABS.map((tab) => {
+                            const isActive = pathname.startsWith(tab.href);
+                            return (
+                                <Link
+                                    key={tab.href}
+                                    href={tab.href}
+                                    className={clsx(
+                                        "flex items-center gap-2 px-4 py-2 rounded-lg text-[11px] font-bold transition-all",
+                                        isActive
+                                            ? "bg-ink text-surface shadow-sm"
+                                            : "text-muted hover:text-ink hover:bg-accent-surface"
+                                    )}
+                                >
+                                    {tab.icon}
+                                    <span>{tab.name}</span>
+                                </Link>
+                            );
+                        })}
+                    </nav>
                 </div>
 
                 <div className="relative">
@@ -83,15 +117,17 @@ export default function AppLayout({
                             <div className="fixed inset-0 z-10" onClick={() => setIsAccountMenuOpen(false)} />
                             <div className="absolute top-full right-0 mt-1 w-48 bg-surface border border-line rounded-lg shadow-lg z-20 py-1 overflow-hidden">
                                 <div className="px-3 py-2 border-b border-line mb-1">
-                                    <div className="font-bold text-[11px]">demo@example.com</div>
-                                    <div className="text-[9px] text-muted">Administrator</div>
+                                    <div className="font-bold text-[11px] truncate">{user?.email || "GUEST"}</div>
+                                    <div className="text-[9px] text-muted">{isAdmin ? "Administrator" : "User"}</div>
                                 </div>
                                 <button className="w-full text-left px-3 py-2 text-[11px] hover:bg-accent-surface flex items-center gap-2">
                                     <Settings size={14} /> 設定
                                 </button>
-                                <Link href="/admin" className="w-full text-left px-3 py-2 text-[11px] hover:bg-accent-surface flex items-center gap-2">
-                                    <LayoutDashboard size={14} /> 管理画面
-                                </Link>
+                                {isAdmin && (
+                                    <Link href="/admin" className="w-full text-left px-3 py-2 text-[11px] hover:bg-accent-surface flex items-center gap-2">
+                                        <LayoutDashboard size={14} /> 管理画面
+                                    </Link>
+                                )}
                                 <div className="border-t border-line mt-1 pt-1">
                                     <button
                                         onClick={logout}
@@ -105,8 +141,6 @@ export default function AppLayout({
                     )}
                 </div>
             </header>
-
-            <Navigation />
 
             <main className="flex-1 p-6 overflow-auto scrollbar-thin scrollbar-thumb-line">
                 {children}

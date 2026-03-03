@@ -10,8 +10,7 @@ export async function getGeminiResponse(
     prompt: string,
     files?: { data: string; mimeType: string }[]
 ) {
-    // Probed result: "gemini-3-flash-preview" is available for this API key.
-    // For stable use, "gemini-flash-latest" is also a good option.
+    // Use gemini-3-flash-preview as requested
     const model = genAI.getGenerativeModel({ model: "gemini-3-flash-preview" });
 
     const SUPPORTED_MIMES = [
@@ -31,7 +30,7 @@ export async function getGeminiResponse(
 
     let finalPrompt = prompt;
     if (skippedSome) {
-        finalPrompt += "\n\n(注意: サポートされていない形式のファイルが含まれていたため、一部のファイルはスキップされました。現在はPDF、画像、プレーンテキストのみを解析可能です。)";
+        finalPrompt += "\n\n(補足: 一部の解析困難な形式のファイルは、システム側でテキストやPDFに変換してプロンプトに含めているか、あるいはスキップされています。提供されている情報の範囲で回答してください。)";
     }
 
     const parts: (string | Part)[] = [finalPrompt];

@@ -5,8 +5,11 @@ import { PlayCircle, MessageSquare, Award, CheckCircle2, AlertCircle, ChevronRig
 import { useState, useEffect, useRef } from "react";
 import { useProject, Document, DocumentFile } from "@/context/ProjectContext";
 import { getAISimulatorResponse, startVoiceRecognition, fileToBase64, AIFile } from "@/lib/ai";
+import { getFormattedKnowledge } from "@/lib/knowledge";
 import { clsx } from "clsx";
 import { Volume2, VolumeX } from "lucide-react";
+import { jsPDF } from "jspdf";
+import autoTable from "jspdf-autotable";
 
 type Step = "setup" | "interview" | "result" | "history";
 type Focus = "通常" | "資金使途・返済計画" | "事業計画" | "経歴等信用確認" | "細かい質問";
@@ -76,7 +79,20 @@ export default function SimulatorPage() {
             });
         });
 
-        const initialText = await getAISimulatorResponse("__START__", selectedFocus, activeProject?.source || "不明な融資元", activeProject?.documents || [], contextFiles);
+        const expertKnowledge = await getFormattedKnowledge({
+            institution: activeProject?.source,
+            program: activeProject?.jfcLoanProgramId
+        });
+
+        const initialText = await getAISimulatorResponse(
+            "__START__",
+            selectedFocus,
+            activeProject?.source || "不明な融資元",
+            activeProject?.documents || [],
+            contextFiles,
+            [],
+            expertKnowledge
+        );
 
         // Parse progress if any
         const progMatch = initialText.match(/\[PROGRESS:\s?(\d+)\]/);
@@ -152,13 +168,19 @@ export default function SimulatorPage() {
                 });
             }
 
+            const expertKnowledge = await getFormattedKnowledge({
+                institution: activeProject?.source,
+                program: activeProject?.jfcLoanProgramId
+            });
+
             const response = await getAISimulatorResponse(
                 userMsg || "現在の資料で不明点があれば質問してください。",
                 selectedFocus,
                 activeProject?.source || "不明な融資元",
                 activeProject?.documents || [],
                 aiFiles,
-                messages // Pass history
+                messages, // Pass history
+                expertKnowledge
             );
 
             // Handle Tags
@@ -193,7 +215,9 @@ export default function SimulatorPage() {
     const toggleVoice = () => {
         if (isListening) return;
         setIsListening(true);
-        startVoiceRecognition((text) => setInputText(text), () => setIsListening(false));
+        startVoiceRecognition((text) => {
+            setInputText(prev => (prev ? prev + " " + text : text));
+        }, () => setIsListening(false));
     };
 
     const speakText = (text: string, idx: number) => {
@@ -216,10 +240,33 @@ export default function SimulatorPage() {
     const finishSession = () => {
         if (!activeProject || !currentSessionId) return;
 
-        // Extract grade from last AI message if possible
         const lastAiMsg = [...messages].reverse().find(m => m.role === "ai")?.text || "";
         const gradeMatch = lastAiMsg.match(/【最終評価:\s?([A-D])】/i);
         const finalGrade = gradeMatch ? gradeMatch[1].toUpperCase() : "B";
+
+        // Parse Report
+        let reportDetails = {
+            good: [] as string[],
+            bad: [] as string[],
+            docs: [] as string[],
+            criteria: [] as string[]
+        };
+
+        const reportMatch = lastAiMsg.match(/\[REPORT_START\]([\s\S]*?)\[REPORT_END\]/);
+        if (reportMatch) {
+            const reportText = reportMatch[1];
+            const sections = reportText.split(/【(.*?)】/);
+            for (let i = 1; i < sections.length; i += 2) {
+                const title = sections[i];
+                const content = sections[i + 1]?.trim();
+                const items = content.split('\n').map(l => l.replace(/^[-*]\s?/, "").trim()).filter(Boolean);
+
+                if (title.includes("良かった")) reportDetails.good = items;
+                else if (title.includes("悪かった")) reportDetails.bad = items;
+                else if (title.includes("書類別")) reportDetails.docs = items;
+                else if (title.includes("評価項目別")) reportDetails.criteria = items;
+            }
+        }
 
         saveSimulatorSession({
             id: currentSessionId,
@@ -228,10 +275,57 @@ export default function SimulatorPage() {
             messages,
             status: "completed",
             score: finalGrade,
-            summary: lastAiMsg
+            summary: lastAiMsg,
+            reportDetails // Store for retrieval if needed
         });
 
         setStep("result");
+    };
+
+    const exportReportToPdf = () => {
+        if (!activeProject) return;
+        const session = activeProject.simulatorSessions.find(s => s.id === currentSessionId);
+        if (!session || !session.reportDetails) return;
+
+        const doc = new jsPDF();
+
+        // Title
+        doc.setFontSize(18);
+        doc.text("融資面談シミュレーション詳細フィードバック", 14, 20);
+
+        doc.setFontSize(10);
+        doc.text(`プロジェクト: ${activeProject.name}`, 14, 30);
+        doc.text(`面談日: ${session.date}`, 14, 35);
+        doc.text(`フォーカス: ${session.focus}`, 14, 40);
+        doc.text(`評価等級: ${session.score}`, 14, 45);
+
+        let startY = 55;
+
+        const sections = [
+            { title: "良かった点", data: session.reportDetails.good },
+            { title: "悪かった点（改善すべき点）", data: session.reportDetails.bad },
+            { title: "書類別フィードバック", data: session.reportDetails.docs },
+            { title: "評価項目別フィードバック", data: session.reportDetails.criteria }
+        ];
+
+        sections.forEach(section => {
+            doc.setFontSize(12);
+            doc.setTextColor(31, 41, 55);
+            doc.text(section.title, 14, startY);
+
+            autoTable(doc, {
+                startY: startY + 2,
+                body: section.data.map(item => [item]),
+                theme: 'plain',
+                styles: { fontSize: 9, cellPadding: 1 },
+                columnStyles: { 0: { cellWidth: 180 } },
+                margin: { left: 14 }
+            });
+
+            startY = (doc as any).lastAutoTable.finalY + 10;
+        });
+
+        doc.save(`Simulation_Report_${activeProject.name}_${session.date}.pdf`);
     };
 
     if (!activeProject) return <AppLayout>Loading...</AppLayout>;
@@ -522,16 +616,16 @@ export default function SimulatorPage() {
                         <h3 className="text-lg font-bold text-emerald-700">良かったポイント</h3>
                     </div>
                     <ul className="space-y-4">
-                        {[
-                            "資金使途の明確性が高く、見積書との整合性が完璧です",
-                            "事業計画における強み（特許技術）の活用法が具体的でした",
-                            "リスク管理体制における代表者の責任範囲が明確化されています"
-                        ].map((p, i) => (
-                            <li key={i} className="flex gap-4 text-xs leading-relaxed text-emerald-800">
-                                <span className="font-black opacity-20 text-xl">0{i + 1}</span>
-                                {p}
-                            </li>
-                        ))}
+                        {(() => {
+                            const session = activeProject.simulatorSessions.find(s => s.id === currentSessionId);
+                            const items = session?.reportDetails?.good || ["具体性が高い回答でした", "熱意が伝わりました"];
+                            return items.map((p, i) => (
+                                <li key={i} className="flex gap-4 text-xs leading-relaxed text-emerald-800">
+                                    <span className="font-black opacity-20 text-xl">0{i + 1}</span>
+                                    {p}
+                                </li>
+                            ));
+                        })()}
                     </ul>
                 </div>
 
@@ -541,23 +635,28 @@ export default function SimulatorPage() {
                         <h3 className="text-lg font-bold text-amber-700">改善ポイント</h3>
                     </div>
                     <ul className="space-y-4">
-                        {[
-                            "競合他社の参入障壁について、より詳細な分析を求められる可能性があります",
-                            "原材料高騰への対策について、具体的な価格転嫁スキームを準備してください",
-                            "代表者不在時の代替決済権限について補足しておくと安心です"
-                        ].map((p, i) => (
-                            <li key={i} className="flex gap-4 text-xs leading-relaxed text-amber-800">
-                                <span className="font-black opacity-20 text-xl text-amber-700">0{i + 1}</span>
-                                {p}
-                            </li>
-                        ))}
+                        {(() => {
+                            const session = activeProject.simulatorSessions.find(s => s.id === currentSessionId);
+                            const items = session?.reportDetails?.bad || ["より具体的な数値目標が必要です", "競合分析を強化してください"];
+                            return items.map((p, i) => (
+                                <li key={i} className="flex gap-4 text-xs leading-relaxed text-amber-800">
+                                    <span className="font-black opacity-20 text-xl text-amber-700">0{i + 1}</span>
+                                    {p}
+                                </li>
+                            ));
+                        })()}
                     </ul>
                 </div>
             </div>
 
             <div className="flex justify-center gap-4 pt-10">
                 <button onClick={() => setStep("setup")} className="blueprint-btn-primary px-16 py-4">シミュレーションを終了</button>
-                <button className="blueprint-btn-outline px-10 py-4">詳細FBをPDFで保存</button>
+                <button
+                    onClick={exportReportToPdf}
+                    className="blueprint-btn-outline px-10 py-4 flex items-center gap-2"
+                >
+                    <FileText size={18} /> 詳細FBをPDFで保存
+                </button>
             </div>
         </div>
     );

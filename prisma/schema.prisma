@@ -1,0 +1,120 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id        String    @id @default(cuid())
+  email     String    @unique
+  password  String?
+  name      String?
+  role      String    @default("user")
+  googleId  String?   @unique @map("google_id")
+  projects  Project[]
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@map("users")
+}
+
+model KnowledgeEntry {
+  id         String   @id @default(cuid())
+  category   String
+  targetId   String?  @map("target_id")
+  title      String
+  content    String
+  sourceType String   @map("source_type")
+  sourceUrl  String?  @map("source_url")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@map("knowledge_entries")
+}
+
+model Project {
+  id                String             @id @default(cuid())
+  name              String
+  source            String
+  jfcLoanProgramId  String?            @map("jfc_loan_program_id")
+  amount            String
+  status            String             @default("進行中")
+  userId            String             @map("user_id")
+  user              User               @relation(fields: [userId], references: [id])
+  documents         Document[]
+  simulatorSessions SimulatorSession[]
+  createdAt         DateTime           @default(now()) @map("created_at")
+
+  @@map("projects")
+}
+
+model Document {
+  id            String         @id @default(cuid())
+  templateId    String         @map("template_id") // e.g., "bs", "pl"
+  category      String
+  status        String         @default("missing")
+  type          String         @default("required")
+  requiredCount Int            @default(1) @map("required_count")
+  projectId     String         @map("project_id")
+  project       Project        @relation(fields: [projectId], references: [id])
+  files         DocumentFile[]
+  messages      Message[]
+  todoItems     TodoItem[]
+
+  @@map("documents")
+}
+
+model DocumentFile {
+  id         String   @id @default(cuid())
+  name       String
+  date       String
+  mimeType   String?  @map("mime_type")
+  base64Data String?  @map("base64_data")
+  r2Url      String?  @map("r2_url")
+  csvContent String?  @map("csv_content")
+  documentId String   @map("document_id")
+  document   Document @relation(fields: [documentId], references: [id])
+
+  @@map("document_files")
+}
+
+model Message {
+  id         String   @id @default(cuid())
+  role       String   // "user" | "ai"
+  text       String
+  documentId String   @map("document_id")
+  document   Document @relation(fields: [documentId], references: [id])
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@map("messages")
+}
+
+model TodoItem {
+  id         String   @id @default(cuid())
+  text       String
+  completed  Boolean  @default(false)
+  documentId String   @map("document_id")
+  document   Document @relation(fields: [documentId], references: [id])
+
+  @@map("todo_items")
+}
+
+model SimulatorSession {
+  id        String   @id @default(cuid())
+  date      String
+  focus     String
+  status    String   @default("ongoing") // "ongoing" | "completed"
+  score     String?
+  summary   String?
+  report    Json?    // reportDetails
+  messages  Json     // messages history
+  projectId String   @map("project_id")
+  project   Project  @relation(fields: [projectId], references: [id])
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("simulator_sessions")
+}

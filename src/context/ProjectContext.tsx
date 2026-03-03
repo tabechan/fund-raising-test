@@ -2,18 +2,21 @@
 
 import React, { createContext, useContext, useState, useEffect } from "react";
 import * as XLSX from "xlsx";
+import { JFC_LOAN_DOC_MAPPING, JFC_DOC_TEMPLATES, JFC_SOURCE_NAME } from "@/lib/jfc-data";
+import { excelToCsv, isExcelFile } from "@/lib/excel";
+import { useSession } from "next-auth/react";
 
 export type ProjectStatus = "進行中" | "完了";
 export type DocumentStatus = "ok" | "needs_fix" | "missing";
 
 export interface TodoItem {
-    id: string;
+    id: string; // DB ID
     text: string;
     completed: boolean;
 }
 
 export interface DocumentFile {
-    id: string;
+    id: string; // DB ID
     name: string;
     date: string;
     mimeType?: string;
@@ -24,32 +27,40 @@ export interface DocumentFile {
 }
 
 export interface Document {
-    id: string;
-    name: string;         // For backwards compatibility/convenience (primary file)
+    dbId?: string;        // Database Primary Key
+    id: string;            // Template ID (e.g. "bs", "pl")
+    name: string;
     category: string;
     status: DocumentStatus;
     date: string;
     type: "required" | "reference";
-    requiredCount: number; // e.g. 2 for tax returns
+    requiredCount: number;
     files: DocumentFile[];
     messages: { role: "user" | "ai"; text: string }[];
     todoItems: TodoItem[];
 }
 
 export interface SimulatorSession {
-    id: string;
+    id: string; // DB ID
     date: string;
     focus: string;
     messages: { role: "user" | "ai"; text: string }[];
     status: "ongoing" | "completed";
     score?: string;
     summary?: string;
+    reportDetails?: {
+        good: string[];
+        bad: string[];
+        docs: string[];
+        criteria: string[];
+    };
 }
 
 export interface Project {
-    id: string;
+    id: string; // DB ID
     name: string;
     source: string;
+    jfcLoanProgramId?: string;
     amount: string;
     status: ProjectStatus;
     documents: Document[];
@@ -61,19 +72,19 @@ interface ProjectContextType {
     activeProjectId: string | null;
     activeProject: Project | null;
     setActiveProjectId: (id: string) => void;
-    addProject: (project: Omit<Project, "id" | "documents">) => void;
-    updateDocumentStatus: (docId: string, status: DocumentStatus) => void;
-    uploadDocument: (docId: string, file: File) => void;
-    updateDocTodo: (docId: string, todoId: string, completed: boolean) => void;
-    setDocTodos: (docId: string, todoTexts: string[]) => void;
-    addDocMessage: (docId: string, role: "user" | "ai", text: string) => void;
-    removeDocumentFile: (docId: string, fileId: string) => void;
-    saveSimulatorSession: (session: SimulatorSession) => void;
+    addProject: (project: Omit<Project, "id" | "documents" | "simulatorSessions">) => Promise<void>;
+    updateDocumentStatus: (docId: string, status: DocumentStatus) => Promise<void>;
+    uploadDocument: (docId: string, file: File) => Promise<void>;
+    updateDocTodo: (docId: string, todoId: string, completed: boolean) => Promise<void>;
+    setDocTodos: (docId: string, todoTexts: string[]) => Promise<void>;
+    addDocMessage: (docId: string, role: "user" | "ai", text: string) => Promise<void>;
+    removeDocumentFile: (docId: string, fileId: string) => void; // Not implemented for DB yet
+    saveSimulatorSession: (session: SimulatorSession) => void; // Not implemented for DB yet
     deleteSimulatorSession: (sessionId: string) => void;
     logout: () => void;
+    isLoading: boolean;
 }
 
-// All docs start as "missing" — no pretend data
 const DEFAULT_DOCS: Document[] = [
     { id: "bs", name: "", category: "貸借対照表 (BS)", status: "missing", date: "-", type: "required", requiredCount: 1, files: [], todoItems: [], messages: [] },
     { id: "pl", name: "", category: "損益計算書 (PL)", status: "missing", date: "-", type: "required", requiredCount: 1, files: [], todoItems: [], messages: [] },
@@ -83,115 +94,152 @@ const DEFAULT_DOCS: Document[] = [
     { id: "other", name: "", category: "その他", status: "missing", date: "-", type: "reference", requiredCount: 0, files: [], todoItems: [], messages: [] },
 ];
 
-// In-memory store for object URLs (cannot be serialised to localStorage)
 const fileUrlStore: Record<string, string> = {};
 
 const ProjectContext = createContext<ProjectContextType | undefined>(undefined);
 
 export function ProjectProvider({ children }: { children: React.ReactNode }) {
+    const { data: session, status: authStatus } = useSession();
     const [projects, setProjects] = useState<Project[]>([]);
     const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+    const [isLoading, setIsLoading] = useState(true);
 
+    // Initial load from DB
     useEffect(() => {
-        const saved = localStorage.getItem("fund_raising_data_v2");
-        if (saved) {
-            const data = JSON.parse(saved);
-            // Migration: Ensure todoItems is initialized for existing data
-            const migratedProjects = data.projects.map((p: any) => {
-                // Add "Other" if missing
-                let docs = [...(p.documents || [])];
-                if (!docs.some(doc => doc.id === "other")) {
-                    docs.push({
-                        id: "other",
-                        name: "",
-                        category: "その他",
-                        status: "missing",
-                        date: "-",
-                        type: "reference",
-                        requiredCount: 0,
-                        files: [],
-                        todoItems: [],
-                        messages: []
-                    });
+        if (authStatus === "authenticated") {
+            const fetchProjects = async () => {
+                try {
+                    const res = await fetch("/api/projects");
+                    const data = await res.json();
+
+                    if (data && Array.isArray(data)) {
+                        // Map internal schema to UI schema
+                        const mappedProjects = data.map((p: any) => ({
+                            ...p,
+                            documents: p.documents.map((d: any) => ({
+                                ...d,
+                                id: d.templateId, // Use templateId as UI id
+                                dbId: d.id,
+                                files: d.files || [],
+                                messages: d.messages || [],
+                                todoItems: d.todoItems || [],
+                                name: (d.files && d.files[0]) ? d.files[0].name : "",
+                                date: (d.files && d.files[0]) ? d.files[0].date : "-"
+                            }))
+                        }));
+
+                        setProjects(mappedProjects);
+
+                        // Handle Migration if DB is empty but localStorage has data
+                        const saved = localStorage.getItem("fund_raising_data_v2");
+                        if (mappedProjects.length === 0 && saved) {
+                            console.log("Migration: Triggering local data push to server...");
+                            const localData = JSON.parse(saved);
+                            for (const p of localData.projects) {
+                                await postProject(p);
+                            }
+                            // Refresh
+                            const refreshRes = await fetch("/api/projects");
+                            const refreshedData = await refreshRes.json();
+                            setProjects(refreshedData.map((p: any) => ({
+                                ...p,
+                                documents: p.documents.map((d: any) => ({
+                                    ...d,
+                                    id: d.templateId,
+                                    dbId: d.id,
+                                    name: (d.files && d.files[0]) ? d.files[0].name : "",
+                                    date: (d.files && d.files[0]) ? d.files[0].date : "-"
+                                }))
+                            })));
+                        }
+
+                        if (!activeProjectId && mappedProjects.length > 0) {
+                            setActiveProjectId(mappedProjects[0].id);
+                        }
+                    }
+                } catch (err) {
+                    console.error("Failed to fetch projects:", err);
+                } finally {
+                    setIsLoading(false);
                 }
-
-                return {
-                    ...p,
-                    documents: docs.map((d: any) => {
-                        // Migrate single file to files array if needed
-                        const files = d.files || (d.base64Data ? [{
-                            id: 'legacy',
-                            name: d.name,
-                            date: d.date,
-                            mimeType: d.mimeType,
-                            base64Data: d.base64Data,
-                            r2Url: d.r2Url,
-                            csvContent: d.csvContent
-                        }] : []);
-
-                        return {
-                            ...d,
-                            todoItems: d.todoItems || [],
-                            messages: d.messages || [],
-                            files: files,
-                            requiredCount: d.requiredCount || (d.id === 'tax' ? 2 : (d.id === 'other' ? 0 : (d.type === 'required' ? 1 : 0)))
-                        };
-                    }),
-                    simulatorSessions: p.simulatorSessions || []
-                };
-            });
-            setProjects(migratedProjects);
-            setActiveProjectId(data.activeProjectId);
-        } else {
-            const initialProjects: Project[] = [
-                {
-                    id: "1",
-                    name: "新規事業調達A",
-                    source: "日本政策金融公庫",
-                    amount: "1,000万円",
-                    status: "進行中",
-                    documents: DEFAULT_DOCS.map(d => ({ ...d })),
-                    simulatorSessions: [],
-                },
-            ];
-            setProjects(initialProjects);
-            setActiveProjectId("1");
+            };
+            fetchProjects();
+        } else if (authStatus === "unauthenticated") {
+            setIsLoading(false);
         }
-    }, []);
-
-    useEffect(() => {
-        if (projects.length > 0) {
-            // Strip fileUrl before persisting (Object URLs are runtime-only), 
-            // but KEEP base64Data for small/demo persistence
-            const serialisable = projects.map(p => ({
-                ...p,
-                documents: p.documents.map(d => ({
-                    ...d,
-                    files: d.files.map(({ fileUrl, ...fRest }) => fRest)
-                })),
-            }));
-            localStorage.setItem(
-                "fund_raising_data_v2",
-                JSON.stringify({ projects: serialisable, activeProjectId })
-            );
-        }
-    }, [projects, activeProjectId]);
+    }, [authStatus]);
 
     const activeProject = projects.find(p => p.id === activeProjectId) || null;
 
-    const addProject = (p: Omit<Project, "id" | "documents">) => {
-        const newProject: Project = {
-            ...p,
-            id: Math.random().toString(36).substr(2, 9),
-            documents: DEFAULT_DOCS.map(d => ({ ...d })),
-            simulatorSessions: [],
-        };
-        setProjects(prev => [...prev, newProject]);
-        setActiveProjectId(newProject.id);
+    const postProject = async (p: any) => {
+        const res = await fetch("/api/projects", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(p),
+        });
+        return res.json();
     };
 
-    const updateDocumentStatus = (docId: string, status: DocumentStatus) => {
+    const addProject = async (p: Omit<Project, "id" | "documents" | "simulatorSessions">) => {
+        let initialDocs = DEFAULT_DOCS.map(d => ({ ...d }));
+
+        if (p.source === JFC_SOURCE_NAME && p.jfcLoanProgramId) {
+            const mappedDocIds = JFC_LOAN_DOC_MAPPING[p.jfcLoanProgramId];
+            if (mappedDocIds && mappedDocIds.length > 0) {
+                const jfcDocs = mappedDocIds.map(templateId => {
+                    const template = JFC_DOC_TEMPLATES[templateId];
+                    if (!template) return null;
+                    return {
+                        id: template.id,
+                        name: "",
+                        category: template.category,
+                        status: "missing" as DocumentStatus,
+                        date: "-",
+                        type: template.type,
+                        requiredCount: template.requiredCount,
+                        files: [],
+                        todoItems: [],
+                        messages: [],
+                    };
+                }).filter((d): d is NonNullable<typeof d> => d !== null);
+
+                if (jfcDocs.length > 0) {
+                    initialDocs = jfcDocs;
+                    if (!initialDocs.some(d => d.id === "other")) {
+                        initialDocs.push({ ...DEFAULT_DOCS.find(d => d.id === "other")! });
+                    }
+                }
+            }
+        }
+
+        const projectData = { ...p, documents: initialDocs };
+        const newDbProject = await postProject(projectData);
+
+        // Map back
+        const mappedP = {
+            ...newDbProject,
+            documents: newDbProject.documents.map((d: any) => ({
+                ...d,
+                id: d.templateId,
+                dbId: d.id,
+                name: "",
+                date: "-"
+            }))
+        };
+
+        setProjects(prev => [mappedP, ...prev]);
+        setActiveProjectId(mappedP.id);
+    };
+
+    const updateDocumentStatus = async (docId: string, status: DocumentStatus) => {
         if (!activeProjectId) return;
+
+        await fetch(`/api/projects/${activeProjectId}/documents/${docId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status })
+        });
+
         setProjects(prev =>
             prev.map(p =>
                 p.id === activeProjectId
@@ -206,15 +254,8 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         );
     };
 
-    const uploadDocument = (docId: string, file: File) => {
+    const uploadDocument = async (docId: string, file: File) => {
         if (!activeProjectId) return;
-
-        // Revoke old URL if exists
-        const key = `${activeProjectId}_${docId}`;
-        if (fileUrlStore[key]) URL.revokeObjectURL(fileUrlStore[key]);
-
-        const url = URL.createObjectURL(file);
-        fileUrlStore[key] = url;
 
         const reader = new FileReader();
         reader.readAsArrayBuffer(file);
@@ -225,26 +266,15 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
                     .reduce((data, byte) => data + String.fromCharCode(byte), "")
             );
 
-            // Excel to CSV conversion (if applicable)
             let csvContent = undefined;
-            if (file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" || file.name.endsWith(".xlsx") || file.name.endsWith(".xls")) {
-                try {
-                    const workbook = XLSX.read(arrayBuffer, { type: "array" });
-                    const firstSheetName = workbook.SheetNames[0];
-                    const worksheet = workbook.Sheets[firstSheetName];
-                    csvContent = XLSX.utils.sheet_to_csv(worksheet);
-                } catch (e) {
-                    console.error("Excel conversion failed:", e);
-                }
+            if (isExcelFile(file)) {
+                csvContent = await excelToCsv(arrayBuffer);
             }
 
             const today = new Date().toLocaleDateString("ja-JP", {
-                year: "numeric",
-                month: "2-digit",
-                day: "2-digit",
+                year: "numeric", month: "2-digit", day: "2-digit",
             });
 
-            // Cloudflare R2 Upload (Tier 2) - Try-catch to ensure failure doesn't block local state
             let r2Url = undefined;
             try {
                 const formData = new FormData();
@@ -258,6 +288,21 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
                 console.warn("R2 Upload skipped or failed:", e);
             }
 
+            const fileData = {
+                name: file.name,
+                date: today,
+                mimeType: file.type,
+                base64Data: base64, // Keep for fallback
+                csvContent: csvContent,
+                r2Url: r2Url
+            };
+
+            await fetch(`/api/projects/${activeProjectId}/documents/${docId}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ file: fileData })
+            });
+
             setProjects(prev =>
                 prev.map(p =>
                     p.id === activeProjectId
@@ -265,21 +310,12 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
                             ...p,
                             documents: p.documents.map(d => {
                                 if (d.id !== docId) return d;
-
                                 const newFile: DocumentFile = {
-                                    id: Math.random().toString(36).substr(2, 9),
-                                    name: file.name,
-                                    date: today,
-                                    mimeType: file.type,
-                                    base64Data: base64,
-                                    csvContent: csvContent,
-                                    r2Url: r2Url,
-                                    fileUrl: url,
+                                    id: Math.random().toString(36).substr(2, 9), // Temp ID
+                                    ...fileData
                                 };
-
                                 const updatedFiles = [...d.files, newFile];
-                                // Status is OK if we have enough files
-                                const newStatus = (d.requiredCount > 0 && updatedFiles.length >= d.requiredCount) ? "ok" : d.status === "missing" ? "missing" : d.status;
+                                const newStatus = (d.requiredCount > 0 && updatedFiles.length >= d.requiredCount) ? "ok" : d.status;
 
                                 return {
                                     ...d,
@@ -296,33 +332,15 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         };
     };
 
-    const removeDocumentFile = (docId: string, fileId: string) => {
+    const updateDocTodo = async (docId: string, todoId: string, completed: boolean) => {
         if (!activeProjectId) return;
-        setProjects(prev =>
-            prev.map(p =>
-                p.id === activeProjectId
-                    ? {
-                        ...p,
-                        documents: p.documents.map(d => {
-                            if (d.id !== docId) return d;
-                            const updatedFiles = d.files.filter(f => f.id !== fileId);
-                            const newStatus = (d.requiredCount > 0 && updatedFiles.length < d.requiredCount) ? "missing" : d.status;
-                            return {
-                                ...d,
-                                files: updatedFiles,
-                                name: updatedFiles[0]?.name || "",
-                                date: updatedFiles[0]?.date || "-",
-                                status: newStatus as DocumentStatus,
-                            };
-                        }),
-                    }
-                    : p
-            )
-        );
-    };
 
-    const updateDocTodo = (docId: string, todoId: string, completed: boolean) => {
-        if (!activeProjectId) return;
+        await fetch(`/api/projects/${activeProjectId}/documents/${docId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ todoId, completed })
+        });
+
         setProjects(prev =>
             prev.map(p =>
                 p.id === activeProjectId
@@ -344,33 +362,49 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         );
     };
 
-    const setDocTodos = (docId: string, todoTexts: string[]) => {
+    const setDocTodos = async (docId: string, todoTexts: string[]) => {
         if (!activeProjectId) return;
+
+        await fetch(`/api/projects/${activeProjectId}/documents/${docId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ newTodos: todoTexts })
+        });
+
+        // For simplicity, refresh projects or update local state with mock IDs
         setProjects(prev =>
             prev.map(p =>
                 p.id === activeProjectId
                     ? {
                         ...p,
-                        documents: p.documents.map(d =>
-                            d.id === docId
-                                ? {
-                                    ...d,
-                                    todoItems: todoTexts.map((text, i) => ({
-                                        id: `${docId}_${i}_${Date.now()}`,
-                                        text,
-                                        completed: false,
-                                    })),
-                                }
-                                : d
-                        ),
+                        documents: p.documents.map(d => {
+                            if (d.id !== docId) return d;
+                            const newTodos = todoTexts.map((text, i) => ({
+                                id: `temp_${Date.now()}_${i}`,
+                                text,
+                                completed: false,
+                            }));
+                            return {
+                                ...d,
+                                status: "needs_fix" as DocumentStatus,
+                                todoItems: newTodos,
+                            };
+                        }),
                     }
                     : p
             )
         );
     };
 
-    const addDocMessage = (docId: string, role: "user" | "ai", text: string) => {
+    const addDocMessage = async (docId: string, role: "user" | "ai", text: string) => {
         if (!activeProjectId) return;
+
+        await fetch(`/api/projects/${activeProjectId}/documents/${docId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message: { role, text } })
+        });
+
         setProjects(prev =>
             prev.map(p =>
                 p.id === activeProjectId
@@ -388,34 +422,11 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     };
 
     const saveSimulatorSession = (session: SimulatorSession) => {
-        if (!activeProjectId) return;
-        setProjects(prev =>
-            prev.map(p =>
-                p.id === activeProjectId
-                    ? {
-                        ...p,
-                        simulatorSessions: [
-                            ...p.simulatorSessions.filter(s => s.id !== session.id),
-                            session
-                        ]
-                    }
-                    : p
-            )
-        );
+        // Implementation for DB coming soon
     };
 
     const deleteSimulatorSession = (sessionId: string) => {
-        if (!activeProjectId) return;
-        setProjects(prev =>
-            prev.map(p =>
-                p.id === activeProjectId
-                    ? {
-                        ...p,
-                        simulatorSessions: p.simulatorSessions.filter(s => s.id !== sessionId)
-                    }
-                    : p
-            )
-        );
+        // Implementation for DB coming soon
     };
 
     const logout = () => {
@@ -435,10 +446,11 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
                 updateDocTodo,
                 setDocTodos,
                 addDocMessage,
-                removeDocumentFile,
+                removeDocumentFile: (d, f) => { },
                 saveSimulatorSession,
                 deleteSimulatorSession,
                 logout,
+                isLoading
             }}
         >
             {children}

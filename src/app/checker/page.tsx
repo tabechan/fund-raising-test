@@ -5,7 +5,10 @@ import { CheckCircle2, AlertCircle, Clock, Download, Send, Mic, FileText, Eye, L
 import { useState, useRef, useEffect } from "react";
 import { useProject } from "@/context/ProjectContext";
 import { getAICheckerResponse, startVoiceRecognition, fileToBase64, AIFile } from "@/lib/ai";
+import { getFormattedKnowledge } from "@/lib/knowledge";
 import { clsx } from "clsx";
+import { JFC_DOC_TEMPLATES, JFC_SOURCE_NAME, JFC_LOAN_PROGRAMS, JFCLoanProgram } from "@/lib/jfc-data";
+import { excelToCsv, isExcelFile, getExcelMimeType, excelToPdfBase64 } from "@/lib/excel";
 
 const STATUS_CONFIG = {
     ok: { icon: <CheckCircle2 size={18} className="text-emerald-700" />, label: "OK", text: "text-emerald-700", bg: "bg-emerald-50/50", border: "border-emerald-200" },
@@ -82,13 +85,27 @@ export default function CheckerPage() {
             }
 
             try {
+                // Prepare project and cross-doc context
+                const projectInfo = {
+                    name: activeProject.name,
+                    amount: activeProject.amount,
+                    jfcLoanProgram: activeProject.jfcLoanProgramId ? JFC_LOAN_PROGRAMS.find((p: JFCLoanProgram) => p.id === activeProject.jfcLoanProgramId)?.name : undefined
+                };
+
+                const crossDocContext = activeProject.documents
+                    .filter(d => d.id !== selectedDoc.id && d.messages && d.messages.length > 0)
+                    .map(d => `--- ${d.category} ---\n${d.messages[d.messages.length - 1].text.slice(0, 200)}...`)
+                    .join("\n\n");
+
                 const aiResponse = await getAICheckerResponse(
                     prompt,
                     activeProject.source,
                     selectedDoc.category,
                     filesToProvide,
                     [], // No history for initial analysis
-                    aggregatedCsv || undefined
+                    aggregatedCsv || undefined,
+                    projectInfo,
+                    crossDocContext
                 );
 
                 addDocMessage(docId, "ai", aiResponse);
@@ -134,7 +151,7 @@ export default function CheckerPage() {
             const file = e.target.files[0];
             uploadDocument(selectedDoc.id, file);
 
-            const autoMsg = "書類を修正したので再度確認をお願いします。";
+            const autoMsg = `書類「${file.name}」を修正したので再度確認をお願いします。`;
             setInputText("");
             setAttachedFiles([]);
 
@@ -142,10 +159,19 @@ export default function CheckerPage() {
             setIsTyping(true);
 
             try {
-                const aiFiles: AIFile[] = [{
-                    data: await fileToBase64(file),
-                    mimeType: file.type
-                }];
+                // If it's Excel, convert to PDF for Gemini, otherwise use raw
+                let aiFiles: AIFile[] = [];
+                if (isExcelFile(file)) {
+                    const pdfData = await excelToPdfBase64(await file.arrayBuffer());
+                    if (pdfData) {
+                        aiFiles.push({ data: pdfData, mimeType: "application/pdf" });
+                    } else {
+                        // Fallback to raw if PDF fails (though it might error in Gemini)
+                        aiFiles.push({ data: await fileToBase64(file), mimeType: getExcelMimeType(file) });
+                    }
+                } else {
+                    aiFiles.push({ data: await fileToBase64(file), mimeType: file.type });
+                }
 
                 // Include already uploaded files in analysis
                 for (const fItem of selectedDoc.files) {
@@ -154,10 +180,35 @@ export default function CheckerPage() {
                     }
                 }
 
-                const aggregatedCsv = selectedDoc.files
+                // Aggregate CSV content from existing files + newly added excel file
+                let aggregatedCsv = selectedDoc.files
                     .filter(f => f.csvContent)
                     .map(f => `--- 書類: ${f.name} ---\n${f.csvContent}`)
                     .join("\n\n");
+
+                if (isExcelFile(file)) {
+                    const newCsv = await excelToCsv(await file.arrayBuffer());
+                    if (newCsv) {
+                        aggregatedCsv = (aggregatedCsv ? aggregatedCsv + "\n\n" : "") + `--- 書類: ${file.name} (新規アップロード) ---\n${newCsv}`;
+                    }
+                }
+
+                // Prepare project and cross-doc context
+                const projectInfo = {
+                    name: activeProject.name,
+                    amount: activeProject.amount,
+                    jfcLoanProgram: activeProject.jfcLoanProgramId ? JFC_LOAN_PROGRAMS.find((p: JFCLoanProgram) => p.id === activeProject.jfcLoanProgramId)?.name : undefined
+                };
+
+                const crossDocContext = activeProject.documents
+                    .filter(d => d.id !== selectedDoc.id && d.messages && d.messages.length > 0)
+                    .map(d => `--- ${d.category} ---\n${d.messages[d.messages.length - 1].text.slice(0, 200)}...`)
+                    .join("\n\n");
+
+                const expertKnowledge = await getFormattedKnowledge({
+                    institution: activeProject.source,
+                    documentId: selectedDoc.id
+                });
 
                 const response = await getAICheckerResponse(
                     autoMsg,
@@ -165,7 +216,10 @@ export default function CheckerPage() {
                     selectedDoc.category,
                     aiFiles,
                     selectedDoc.messages,
-                    aggregatedCsv || undefined
+                    aggregatedCsv || undefined,
+                    projectInfo,
+                    crossDocContext,
+                    expertKnowledge
                 );
                 addDocMessage(selectedDoc.id, "ai", response);
                 extractAndSetTodos(selectedDoc.id, response);
@@ -180,7 +234,11 @@ export default function CheckerPage() {
     const handleSend = async () => {
         if ((!inputText.trim() && attachedFiles.length === 0) || isTyping || !activeProject || !selectedDoc) return;
 
-        const userMsg = inputText || "添付ファイルを解析してください。";
+        const fileNames = attachedFiles.map(f => `「${f.name}」`).join(", ");
+        const userMsg = inputText.trim()
+            ? (attachedFiles.length > 0 ? `${inputText}\n(添付: ${fileNames})` : inputText)
+            : (attachedFiles.length > 0 ? `${fileNames} を解析してください。` : "");
+
         const filesToUpload = attachedFiles;
         const docId = selectedDoc.id;
 
@@ -192,13 +250,30 @@ export default function CheckerPage() {
         setIsTyping(true);
 
         try {
-            // 1. Chat attachments
+            // 1. Chat attachments - convert Excel to PDF on the fly
             let aiFiles: AIFile[] = await Promise.all(
-                filesToUpload.map(async (f) => ({
-                    data: await fileToBase64(f),
-                    mimeType: f.type,
-                }))
+                filesToUpload.map(async (f) => {
+                    if (isExcelFile(f)) {
+                        const pdfData = await excelToPdfBase64(await f.arrayBuffer());
+                        if (pdfData) return { data: pdfData, mimeType: "application/pdf" };
+                        return { data: await fileToBase64(f), mimeType: getExcelMimeType(f) };
+                    }
+                    return { data: await fileToBase64(f), mimeType: f.type };
+                })
             );
+
+            // SPECIAL LOGIC: Check for "はい" and pending update
+            const lastAiMsg = selectedDoc.messages && selectedDoc.messages[selectedDoc.messages.length - 1];
+            if (inputText.trim() === "はい" && lastAiMsg && lastAiMsg.role === "ai" && lastAiMsg.text.includes("[SUGGEST_UPDATE:")) {
+                const match = lastAiMsg.text.match(/\[SUGGEST_UPDATE:\s*(\w+)\]/);
+                if (match && match[1] && filesToUpload.length > 0) {
+                    const targetDocId = match[1];
+                    uploadDocument(targetDocId, filesToUpload[0]);
+                    addDocMessage(docId, "ai", `${activeProject.documents.find(d => d.id === targetDocId)?.category} を更新しました。`);
+                    setIsTyping(false);
+                    return;
+                }
+            }
 
             // 2. If no files attached to chat but document is uploaded, provide context from ALL files
             if (aiFiles.length === 0 && selectedDoc) {
@@ -212,10 +287,37 @@ export default function CheckerPage() {
                 });
             }
 
-            const aggregatedCsv = selectedDoc?.files
+            // Aggregate CSV content from existing files + newly attached Excel files
+            let aggregatedCsv = selectedDoc?.files
                 .filter(f => f.csvContent)
                 .map(f => `--- 書類: ${f.name} ---\n${f.csvContent}`)
                 .join("\n\n");
+
+            for (const f of filesToUpload) {
+                if (isExcelFile(f)) {
+                    const newCsv = await excelToCsv(await f.arrayBuffer());
+                    if (newCsv) {
+                        aggregatedCsv = (aggregatedCsv ? aggregatedCsv + "\n\n" : "") + `--- 書類: ${f.name} (添付) ---\n${newCsv}`;
+                    }
+                }
+            }
+
+            // Prepare project and cross-doc context
+            const projectInfo = {
+                name: activeProject.name,
+                amount: activeProject.amount,
+                jfcLoanProgram: activeProject.jfcLoanProgramId ? JFC_LOAN_PROGRAMS.find((p: JFCLoanProgram) => p.id === activeProject.jfcLoanProgramId)?.name : undefined
+            };
+
+            const crossDocContext = activeProject.documents
+                .filter(d => d.id !== selectedDoc.id && d.messages && d.messages.length > 0)
+                .map(d => `--- ${d.category} ---\n${d.messages[d.messages.length - 1].text.slice(0, 200)}...`)
+                .join("\n\n");
+
+            const expertKnowledge = await getFormattedKnowledge({
+                institution: activeProject.source,
+                documentId: selectedDoc?.id
+            });
 
             const response = await getAICheckerResponse(
                 userMsg,
@@ -223,7 +325,10 @@ export default function CheckerPage() {
                 selectedDoc?.category || "不明な書類",
                 aiFiles,
                 selectedDoc?.messages || [],
-                aggregatedCsv || undefined
+                aggregatedCsv || undefined,
+                projectInfo,
+                crossDocContext,
+                expertKnowledge
             );
 
             addDocMessage(docId, "ai", response);
@@ -240,7 +345,7 @@ export default function CheckerPage() {
         if (isListening) return;
         setIsListening(true);
         startVoiceRecognition(
-            (text) => setInputText(text),
+            (text) => setInputText(prev => (prev ? prev + " " + text : text)),
             () => setIsListening(false)
         );
     };
@@ -249,9 +354,9 @@ export default function CheckerPage() {
 
     return (
         <AppLayout>
-            <div className="flex h-[calc(100vh-180px)] gap-6 relative">
+            <div className="flex h-[calc(100vh-120px)] gap-6 relative">
                 {/* Left Sidebar */}
-                <aside className="w-72 flex flex-col gap-6">
+                <aside className="w-64 flex flex-col gap-6">
                     <div className="blueprint-card flex-1 overflow-auto p-4 flex flex-col">
                         <div className="blueprint-label mb-4 px-2">Essential</div>
                         <div className="space-y-1 mb-6">
@@ -260,13 +365,13 @@ export default function CheckerPage() {
                                     key={item.id}
                                     onClick={() => setSelectedDocId(item.id)}
                                     className={clsx(
-                                        "w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all text-left border",
+                                        "w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-all text-left border",
                                         selectedDocId === item.id ? "bg-accent-surface border-line shadow-sm" : "border-transparent hover:bg-accent-surface/50"
                                     )}
                                 >
-                                    {STATUS_CONFIG[item.status].icon}
+                                    <div className="scale-75 origin-left">{STATUS_CONFIG[item.status].icon}</div>
                                     <div className="flex-1 overflow-hidden">
-                                        <div className="text-[11px] font-bold truncate">{item.name && item.name !== "-" ? item.name : item.category}</div>
+                                        <div className="text-[10px] font-bold truncate">{item.name && item.name !== "-" ? item.name : item.category}</div>
                                         <div className={clsx("text-[8px] font-bold uppercase", STATUS_CONFIG[item.status].text)}>
                                             {STATUS_CONFIG[item.status].label}
                                         </div>
@@ -282,13 +387,13 @@ export default function CheckerPage() {
                                     key={item.id}
                                     onClick={() => setSelectedDocId(item.id)}
                                     className={clsx(
-                                        "w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all text-left border",
+                                        "w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-all text-left border",
                                         selectedDocId === item.id ? "bg-accent-surface border-line shadow-sm" : "border-transparent hover:bg-accent-surface/50"
                                     )}
                                 >
-                                    {STATUS_CONFIG[item.status].icon}
+                                    <div className="scale-75 origin-left">{STATUS_CONFIG[item.status].icon}</div>
                                     <div className="flex-1 overflow-hidden">
-                                        <div className="text-[11px] font-bold truncate">{item.name && item.name !== "-" ? item.name : item.category}</div>
+                                        <div className="text-[10px] font-bold truncate">{item.name && item.name !== "-" ? item.name : item.category}</div>
                                         <div className={clsx("text-[8px] font-bold uppercase", STATUS_CONFIG[item.status].text)}>
                                             {STATUS_CONFIG[item.status].label}
                                         </div>
@@ -301,19 +406,60 @@ export default function CheckerPage() {
 
                 {/* Main Pane */}
                 <main className="flex-1 flex gap-6 overflow-hidden">
-                    <div className="flex-1 flex flex-col gap-6 overflow-hidden">
-                        <div className={clsx("blueprint-card p-6 border-b-4 transition-all duration-500", STATUS_CONFIG[selectedDoc.status].border.replace('border-', 'border-b-'))}>
-                            <div className="flex justify-between items-start">
-                                <div>
-                                    <div className="blueprint-label mb-1">Checking Target</div>
-                                    <h2 className="text-xl font-bold">{selectedDoc.category}</h2>
-                                    <div className="text-[10px] text-muted font-bold mt-1 tracking-tight">
-                                        {selectedDoc.name || "未提出"} • {STATUS_CONFIG[selectedDoc.status].label}
+                    <div className="flex-1 flex flex-col gap-4 overflow-hidden">
+                        <div className={clsx("blueprint-card px-6 py-4 border-l-4 transition-all duration-500", STATUS_CONFIG[selectedDoc.status].border.replace('border-', 'border-l-'))}>
+                            <div className="flex justify-between items-center gap-6">
+                                <div className="flex items-center gap-6 flex-1 min-w-0">
+                                    <div className="flex-shrink-0">
+                                        <div className="blueprint-label mb-0.5">Checking Target</div>
+                                        <h2 className="text-lg font-bold truncate max-w-[200px]">{selectedDoc.category}</h2>
                                     </div>
+
+                                    <div className="h-8 w-px bg-line flex-shrink-0" />
+
+                                    <div className="flex flex-col">
+                                        <div className="blueprint-label mb-0.5">Status & Info</div>
+                                        <div className="text-[11px] font-bold flex items-center gap-2">
+                                            <span className={STATUS_CONFIG[selectedDoc.status].text}>{STATUS_CONFIG[selectedDoc.status].label}</span>
+                                            <span className="text-line">|</span>
+                                            <span className="text-muted truncate">{selectedDoc.name || "未提出"}</span>
+                                        </div>
+                                    </div>
+
+                                    <div className="h-8 w-px bg-line flex-shrink-0" />
+
+                                    {/* JFC Format Download Links (Inline) */}
+                                    {activeProject.source === JFC_SOURCE_NAME && JFC_DOC_TEMPLATES[selectedDoc.id] && (
+                                        <div className="flex items-center gap-2 overflow-hidden">
+                                            <div className="blueprint-label mr-1 whitespace-nowrap">Template:</div>
+                                            {JFC_DOC_TEMPLATES[selectedDoc.id].downloadUrl && (
+                                                <a
+                                                    href={JFC_DOC_TEMPLATES[selectedDoc.id].downloadUrl}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="flex items-center gap-1.5 px-2 py-1 bg-white border border-line rounded text-[9px] font-bold hover:border-ink transition-colors whitespace-nowrap"
+                                                >
+                                                    <Download size={10} className="text-red-600" />
+                                                    {JFC_DOC_TEMPLATES[selectedDoc.id].downloadUrl?.toLowerCase().endsWith('.zip') ? 'ZIP' : 'PDF'}
+                                                </a>
+                                            )}
+                                            {JFC_DOC_TEMPLATES[selectedDoc.id].excelUrl && (
+                                                <a
+                                                    href={JFC_DOC_TEMPLATES[selectedDoc.id].excelUrl}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="flex items-center gap-1.5 px-2 py-1 bg-white border border-line rounded text-[9px] font-bold hover:border-ink transition-colors whitespace-nowrap"
+                                                >
+                                                    <Download size={10} className="text-emerald-700" />
+                                                    {JFC_DOC_TEMPLATES[selectedDoc.id].excelUrl?.toLowerCase().endsWith('.xls') || JFC_DOC_TEMPLATES[selectedDoc.id].excelUrl?.toLowerCase().endsWith('.xlsx') ? 'EXCEL' : '所定'}
+                                                </a>
+                                            )}
+                                        </div>
+                                    )}
                                 </div>
-                                <div className="flex gap-2">
-                                    <button className="blueprint-btn-outline p-2"><Eye size={14} /></button>
-                                    <button className="blueprint-btn-outline p-2"><Download size={14} /></button>
+                                <div className="flex gap-2 flex-shrink-0">
+                                    <button className="blueprint-btn-outline p-1.5"><Eye size={14} /></button>
+                                    <button className="blueprint-btn-outline p-1.5"><Download size={14} /></button>
                                 </div>
                             </div>
                         </div>

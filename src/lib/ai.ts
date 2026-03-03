@@ -11,27 +11,44 @@ export async function getAICheckerResponse(
     docCategory: string,
     files?: AIFile[],
     history?: { role: string; text: string }[],
-    csvContent?: string
+    csvContent?: string,
+    projectInfo?: { name: string; amount: string; jfcLoanProgram?: string },
+    crossDocContext?: string,
+    expertKnowledge?: string
 ) {
     const historyText = history
         ? history.map(h => `${h.role === 'user' ? 'ユーザー' : 'AI'}: ${h.text}`).join('\n')
         : "";
 
+    const isFirstMessage = !history || history.length === 0;
+
     const prompt = `
-あなたは融資審査のアドバイザーです。
-【重要】現在の解析対象は「${docCategory}」のみです。他の書類や一般的な融資の話ではなく、この書類の内容に特化して回答してください。
-融資元: ${projectSource}
+${isFirstMessage ? "あなたは融資審査のアドバイザーです。" : ""}
+【解析対象書類】: ${docCategory}
+【融資先・プロジェクト情報】
+- 融資候補元: ${projectSource}
+${projectInfo ? `- プロジェクト名: ${projectInfo.name}\n- 融資希望額: ${projectInfo.amount}\n${projectInfo.jfcLoanProgram ? `- 融資制度: ${projectInfo.jfcLoanProgram}\n` : ""}` : ""}
+
+${crossDocContext ? `【他の書類から得られた情報】\n${crossDocContext}\n` : ""}
+
+${expertKnowledge ? `【専門知識ベース (RAG)】\n${expertKnowledge}\n` : ""}
 
 ${csvContent ? `【書類のデータ内容 (CSV形式)】\n${csvContent}\n` : ""}
 
-ユーザーの質問に対して、専門的な視点から回答してください。
-提供された書類（PDF、画像、データ）がある場合は、その内容を${projectSource}の審査基準（RAG知識）に照らして詳細に解析してください。
+ユーザーの質問に対して、上記の情報を踏まえて専門的な視点から回答してください。
+Excelファイルが添付されている場合、システム側で自動的にPDFに変換し、ファイルとしてAIに提供しています。
+これには結合セルやレイアウト情報が含まれているため、それらを正確に読み取って解析してください。
+CSV形式の補助データも提供されている場合は、それらも併せて総合的に判断してください。
+現在の解析対象は「${docCategory}」ですが、他の書類で判明している売上動向や業種情報なども考慮に入れて回答してください。
 
 報告・改善案の提示ルール:
-1. 不備や改善点がある場合は、必ず各項目の先頭に「[ACTION] 」というタグを付けて箇条書きで提示してください。
-   例: [ACTION] 営業利益率の推移を詳細に記載した補足資料を追加してください。
-2. すでに十分な内容である場合は「改善点があまりなさそうです」「大丈夫そうです」と明記し、その上で関連するアドバイスを行ってください。
-3. 書類が未提出の場合は、その書類の役割を説明し、作成のサポートを提案してください。
+1. 不備や改善点（入力漏れ、矛盾など）がある場合は、必ず各項目の先頭に「[ACTION] 」というタグを付けて箇条書きで提示してください。
+   ※書類の必須項目に空欄がある場合は必ず改善点として指摘してください。
+2. すでに十分な内容である場合は「改善点があまりなさそうです」「大丈夫そうです」と明記してください。
+3. 未提出または新規ファイルが添付された際、それが「${docCategory}」以外の書類（例: 収支計画書のチャットで確定申告書が送られてきた場合）であると判断できる場合は、以下のように更新を提案してください。
+   「この資料は[書類名]として保存しますか？」
+   その際、内部タグとして「[SUGGEST_UPDATE: category_id]」を回答の最後（非表示エリアなどの意図ではなく文末）に含めてください。
+4. 以前の挨拶などは繰り返さず、シンプルに回答を開始してください。
 
 これまでのやり取り:
 ${historyText || "（なし）"}
@@ -64,7 +81,8 @@ export async function getAISimulatorResponse(
     projectSource: string,
     documents: any[],
     files?: AIFile[],
-    history?: { role: "user" | "ai"; text: string }[]
+    history?: { role: "user" | "ai"; text: string }[],
+    expertKnowledge?: string
 ) {
     const historyText = history
         ? history.map(h => `${h.role === 'user' ? '相談者' : '審査担当者'}: ${h.text}`).join('\n')
@@ -84,6 +102,8 @@ export async function getAISimulatorResponse(
 提出書類の現状:
 ${docSummary}
 
+${expertKnowledge ? `【専門知識ベース (RAG)】\n${expertKnowledge}\n` : ""}
+
 【振る舞いのルール】
 1. 挨拶と導入:
    開始（__START__）の際は、必ず「本日はお越しいただきありがとうございます」といった丁寧なクッション言葉から冒頭を開始してください。
@@ -93,11 +113,24 @@ ${docSummary}
    詰問するのではなく、プロの審査官としての緊張感を持ちつつも適切な質問を行ってください。提供された書類の内容を引用し、矛盾点や改善すべき点を探ってください。
 3. 最終評価（ABCD）:
    セッション終了時（ユーザーが終了を求めた場合や審査が一段落した場合）は、以下の基準でABCDの4段階評価とフィードバックを出してください。
-   - A: 金融機関が積極的に融資を検討したいと思える、完璧に近い準備状況。
-   - B: 合格点を満たしており、概ね問題ない準備状況。
-   - C: 現状の条件だと厳しい、あるいは検討上、上申しても通せない可能性が高い。具体的な改善が必要。
-   - D: 全く話にならない、あるいは準備が致命的に不足している。
+   - A: 金融機関が融資を確信する、完璧な準備状況（事業計画の具体性、裏付け資料の完備）。
+   - B: 概ね問題ないが、一部に軽微な改善点や確認事項が残る状態。
+   - C: 【厳格設定】現状では「否決」または「再提出」となる可能性が高い状態。書類の不足が1項目でもある場合や、回答が抽象的な場合は迷わずC以下としてください。
+   - D: 全く準備ができていない、または事業の実現性に致命的な欠陥がある。
    ※チャットのやり取りの中で、最後に「【最終評価: X】」という形式で評価を明記してください。
+
+   さらに、最終評価の際には、以下の形式で詳細レポートを回答の末尾に含めてください。
+   [REPORT_START]
+   【良かった点】
+   - (具体的に)
+   【悪かった点（改善すべき点）】
+   - (具体的に)
+   【書類別フィードバック】
+   - (書類名): (具体的なアドバイス)
+   【評価項目別フィードバック】
+   - (項目名): (具体的なアドバイス)
+   [REPORT_END]
+
 4. 会話の自然さとスピード:
    - 2回目以降の回答では、改めての自己紹介や「お越しいただきありがとうございます」といった定型的な挨拶は不要です。文脈に沿って自然に会話を続けてください。
    - 【最重要】一度に質問する内容は「必ず一つだけ」に絞ってください。複数の質問を畳み掛けないでください。

@@ -9,6 +9,7 @@ import { useState, useRef, useCallback } from "react";
 import { clsx } from "clsx";
 import { useProject, Document, DocumentStatus, DocumentFile } from "@/context/ProjectContext";
 import { suggestDocumentCategory, fileToBase64, AIFile } from "@/lib/ai";
+import { JFC_DOC_TEMPLATES, JFC_SOURCE_NAME } from "@/lib/jfc-data";
 
 const STATUS_CONFIG: Record<DocumentStatus, {
     icon: React.ReactNode;
@@ -221,6 +222,33 @@ export default function UploadPage() {
                                                 <p className="text-xs text-muted font-bold tracking-tight">
                                                     {doc.files.length > 0 ? `${doc.files.length} 個のファイルをアップロード済み` : "未アップロード"}
                                                 </p>
+
+                                                {activeProject.source === JFC_SOURCE_NAME && JFC_DOC_TEMPLATES[doc.id] && (
+                                                    <div className="flex gap-2 mt-2">
+                                                        {JFC_DOC_TEMPLATES[doc.id].downloadUrl && (
+                                                            <a
+                                                                href={JFC_DOC_TEMPLATES[doc.id].downloadUrl}
+                                                                target="_blank"
+                                                                rel="noopener noreferrer"
+                                                                className="text-[9px] font-bold text-red-600 hover:underline flex items-center gap-1 bg-white px-2 py-0.5 rounded border border-line"
+                                                            >
+                                                                <Download size={10} />
+                                                                {JFC_DOC_TEMPLATES[doc.id].downloadUrl?.toLowerCase().endsWith('.zip') ? 'ZIP形式' : 'PDF形式'}
+                                                            </a>
+                                                        )}
+                                                        {JFC_DOC_TEMPLATES[doc.id].excelUrl && (
+                                                            <a
+                                                                href={JFC_DOC_TEMPLATES[doc.id].excelUrl}
+                                                                target="_blank"
+                                                                rel="noopener noreferrer"
+                                                                className="text-[9px] font-bold text-emerald-700 hover:underline flex items-center gap-1 bg-white px-2 py-0.5 rounded border border-line"
+                                                            >
+                                                                <Download size={10} />
+                                                                {JFC_DOC_TEMPLATES[doc.id].excelUrl?.toLowerCase().endsWith('.xls') || JFC_DOC_TEMPLATES[doc.id].excelUrl?.toLowerCase().endsWith('.xlsx') ? 'Excel形式' : '所定様式'}
+                                                            </a>
+                                                        )}
+                                                    </div>
+                                                )}
                                             </div>
                                         </div>
 
