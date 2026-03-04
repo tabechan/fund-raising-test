@@ -1,9 +1,16 @@
 import { withAuth } from "next-auth/middleware";
+import { NextResponse } from "next/server";
 
 export default withAuth(
     // Default behavior is to redirect unauthenticated users to the sign-in page
     function middleware(req) {
-        // Custom logic if needed
+        const res = NextResponse.next();
+        // Allow unsafe-eval for sheetjs and jsPDF
+        res.headers.set(
+            "Content-Security-Policy",
+            "script-src 'self' 'unsafe-eval' 'unsafe-inline'; object-src 'none'; base-uri 'self';"
+        );
+        return res;
     },
     {
         callbacks: {
