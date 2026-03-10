@@ -116,7 +116,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
                         // Map internal schema to UI schema
                         const mappedProjects = data.map((p: any) => ({
                             ...p,
-                            documents: p.documents.map((d: any) => ({
+                            documents: (p.documents || []).map((d: any) => ({
                                 ...d,
                                 id: d.templateId, // Use templateId as UI id
                                 dbId: d.id,
@@ -141,16 +141,21 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
                             // Refresh
                             const refreshRes = await fetch("/api/projects");
                             const refreshedData = await refreshRes.json();
-                            setProjects(refreshedData.map((p: any) => ({
-                                ...p,
-                                documents: p.documents.map((d: any) => ({
-                                    ...d,
-                                    id: d.templateId,
-                                    dbId: d.id,
-                                    name: (d.files && d.files[0]) ? d.files[0].name : "",
-                                    date: (d.files && d.files[0]) ? d.files[0].date : "-"
-                                }))
-                            })));
+                            if (Array.isArray(refreshedData)) {
+                                setProjects(refreshedData.map((p: any) => ({
+                                    ...p,
+                                    documents: (p.documents || []).map((d: any) => ({
+                                        ...d,
+                                        id: d.templateId,
+                                        dbId: d.id,
+                                        files: d.files || [],
+                                        messages: d.messages || [],
+                                        todoItems: d.todoItems || [],
+                                        name: (d.files && d.files[0]) ? d.files[0].name : "",
+                                        date: (d.files && d.files[0]) ? d.files[0].date : "-"
+                                    }))
+                                })));
+                            }
                         }
 
                         if (!activeProjectId && mappedProjects.length > 0) {

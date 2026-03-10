@@ -50,7 +50,7 @@ export default function AdminPage() {
         fetchKnowledge();
     }, []);
 
-    const filteredKnowledge = knowledge.filter(k =>
+    const filteredKnowledge = (Array.isArray(knowledge) ? knowledge : []).filter(k =>
         (activeCategory === "all" || k.category === activeCategory) &&
         (k.title.toLowerCase().includes(searchQuery.toLowerCase()) || k.content.toLowerCase().includes(searchQuery.toLowerCase()))
     );
@@ -231,10 +231,10 @@ export default function AdminPage() {
                         <div className="space-y-4">
                             {isLoading ? (
                                 <div className="blueprint-card p-12 text-center text-muted animate-pulse">読み込み中...</div>
-                            ) : filteredKnowledge.length === 0 ? (
+                            ) : (!filteredKnowledge || filteredKnowledge.length === 0) ? (
                                 <div className="blueprint-card p-12 text-center text-muted italic">該当する知識データがありません</div>
                             ) : (
-                                filteredKnowledge.map(item => (
+                                (filteredKnowledge || []).map(item => (
                                     <div key={item.id} className="blueprint-card p-6 group hover:border-ink transition-colors">
                                         <div className="flex justify-between items-start mb-4">
                                             <div className="flex gap-4 items-center">

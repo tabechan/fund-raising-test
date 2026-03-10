@@ -88,8 +88,8 @@ export async function getAISimulatorResponse(
         ? history.map(h => `${h.role === 'user' ? '相談者' : '審査担当者'}: ${h.text}`).join('\n')
         : "";
 
-    const docSummary = documents.map(d => {
-        const fileList = d.files.length > 0 ? `(${d.files.map((f: any) => f.name).join(", ")})` : "(未提出)";
+    const docSummary = (Array.isArray(documents) ? documents : []).map(d => {
+        const fileList = (d.files && d.files.length > 0) ? `(${d.files.map((f: any) => f.name).join(", ")})` : "(未提出)";
         return `- ${d.category}: ${d.status} ${fileList}`;
     }).join("\n");
 
