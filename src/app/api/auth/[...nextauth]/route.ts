@@ -78,13 +78,27 @@ export const authOptions = {
                 user.id = dbUser.id;
                 user.role = dbUser.role;
             } else if (account.provider === "credentials") {
-                // For credentials, authorize() already returns the user object.
-                // We just need to ensure the role is set if it's the demo account
                 if (user.email === "demo@example.com") {
-                    user.role = "admin";
+                    // Ensure demo user exists in DB
+                    let dbUser = await prisma.user.findUnique({ where: { email: "demo@example.com" } });
+                    if (!dbUser) {
+                        dbUser = await prisma.user.create({
+                            data: {
+                                id: "1",
+                                email: "demo@example.com",
+                                name: "Demo User",
+                                role: "admin"
+                            }
+                        });
+                    }
+                    user.id = dbUser.id;
+                    user.role = dbUser.role;
                 } else {
                     const dbUser = await prisma.user.findUnique({ where: { email: user.email } });
-                    user.role = dbUser?.role || "user";
+                    if (dbUser) {
+                        user.id = dbUser.id;
+                        user.role = dbUser.role;
+                    }
                 }
             }
             return true;
